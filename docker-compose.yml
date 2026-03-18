@@ -21,6 +21,7 @@ services:
       - N8N_CUSTOM_EXTENSIONS=/opt/n8n-custom
       # Fixed encryption key — credentials are unreadable if this changes
       - N8N_ENCRYPTION_KEY=CvW0YPMfFRm6lLP3FcP2EL8LwnRtVqy5
+      - N8N_SECURE_COOKIE=false
     volumes:
       - n8n_data:/home/node/.n8n
     depends_on:
