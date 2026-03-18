@@ -25,6 +25,8 @@ COPY --from=builder /build/package.json ${NODE_PACKAGE_PATH}/n8n-nodes-tagesspie
 WORKDIR ${NODE_PACKAGE_PATH}/n8n-nodes-tagesspiegel
 RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev
 
+RUN mkdir -p /home/node/.n8n && chown -R node:node /home/node/.n8n
+
 USER node
 
 ENV GENERIC_TIMEZONE=Europe/Berlin

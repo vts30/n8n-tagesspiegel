@@ -4,7 +4,6 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: n8n-tagesspiegel
-    user: "1000:1000"
     restart: unless-stopped
     ports:
       - "5678:5678"
