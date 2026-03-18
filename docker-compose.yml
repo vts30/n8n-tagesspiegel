@@ -1,0 +1,37 @@
+services:
+  n8n:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: n8n-tagesspiegel:latest
+    container_name: n8n-tagesspiegel
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=Europe/Berlin
+      - N8N_LOG_LEVEL=info
+      # Disable telemetry for local testing
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - N8N_COMMUNITY_PACKAGES_ENABLED=false
+      - N8N_CUSTOM_EXTENSIONS=/opt/n8n-custom
+      # Fixed encryption key — credentials are unreadable if this changes
+      - N8N_ENCRYPTION_KEY=CvW0YPMfFRm6lLP3FcP2EL8LwnRtVqy5
+    volumes:
+      - /Users/pulakmandal/context/ba/n8-node/volume:/home/node/.n8n
+    depends_on:
+      - flaresolverr
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+    ports:
+      - "8191:8191"

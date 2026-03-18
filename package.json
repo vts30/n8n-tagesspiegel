@@ -1,0 +1,33 @@
+{
+  "name": "n8n-nodes-tagesspiegel",
+  "version": "0.1.0",
+  "description": "n8n custom node for Tagesspiegel Background scraping",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc && cp src/nodes/TagesSpiegelBackground/tagesspiegel.svg dist/nodes/TagesSpiegelBackground/",
+    "dev": "tsc --watch"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/TagesSpiegelBackgroundApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/TagesSpiegelBackground/TagesSpiegelBackground.node.js"
+    ]
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0",
+    "cheerio": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/node-fetch": "^2.6.0",
+    "@types/cheerio": "^0.22.35",
+    "n8n-workflow": "^1.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": ">=1.0.0"
+  }
+}
