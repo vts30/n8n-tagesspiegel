@@ -3,7 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: n8n-tagesspiegel:latest
     container_name: n8n-tagesspiegel
     restart: unless-stopped
     ports:
@@ -23,7 +22,7 @@ services:
       # Fixed encryption key — credentials are unreadable if this changes
       - N8N_ENCRYPTION_KEY=CvW0YPMfFRm6lLP3FcP2EL8LwnRtVqy5
     volumes:
-      - /Users/pulakmandal/context/ba/n8-node/volume:/home/node/.n8n
+      - n8n_data:/home/node/.n8n
     depends_on:
       - flaresolverr
 
@@ -35,3 +34,6 @@ services:
       - LOG_LEVEL=info
     ports:
       - "8191:8191"
+
+volumes:
+  n8n_data:
