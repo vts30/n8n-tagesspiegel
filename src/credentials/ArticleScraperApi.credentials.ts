@@ -1,8 +1,8 @@
 import { ICredentialType, INodeProperties } from 'n8n-workflow';
 
-export class TagesSpiegelBackgroundApi implements ICredentialType {
-  name = 'tagesSpiegelBackgroundApi';
-  displayName = 'Tagesspiegel Background API';
+export class ArticleScraperApi implements ICredentialType {
+  name = 'articleScraperApi';
+  displayName = 'Article Scraper API';
   documentationUrl = 'https://background.tagesspiegel.de';
   properties: INodeProperties[] = [
     {

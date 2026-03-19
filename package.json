@@ -4,16 +4,16 @@
   "description": "n8n custom node for Tagesspiegel Background scraping",
   "main": "index.js",
   "scripts": {
-    "build": "tsc && cp src/nodes/TagesSpiegelBackground/tagesspiegel.svg dist/nodes/TagesSpiegelBackground/",
+    "build": "tsc && cp src/nodes/ArticleScraper/tagesspiegel.svg dist/nodes/ArticleScraper/",
     "dev": "tsc --watch"
   },
   "n8n": {
     "n8nNodesApiVersion": 1,
     "credentials": [
-      "dist/credentials/TagesSpiegelBackgroundApi.credentials.js"
+      "dist/credentials/ArticleScraperApi.credentials.js"
     ],
     "nodes": [
-      "dist/nodes/TagesSpiegelBackground/TagesSpiegelBackground.node.js"
+      "dist/nodes/ArticleScraper/ArticleScraper.node.js"
     ]
   },
   "dependencies": {

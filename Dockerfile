@@ -23,7 +23,8 @@ COPY --from=builder /build/dist/        ${NODE_PACKAGE_PATH}/n8n-nodes-tagesspie
 COPY --from=builder /build/package.json ${NODE_PACKAGE_PATH}/n8n-nodes-tagesspiegel/
 
 WORKDIR ${NODE_PACKAGE_PATH}/n8n-nodes-tagesspiegel
-RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev && \
+    ln -sf /usr/local/lib/node_modules/n8n/node_modules/n8n-workflow ./node_modules/n8n-workflow
 
 RUN mkdir -p /home/node/.n8n && chown -R node:node /home/node/.n8n
 

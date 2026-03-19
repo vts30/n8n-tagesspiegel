@@ -9,10 +9,89 @@ import {
 import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
 
-const BASE_URL = 'https://background.tagesspiegel.de';
-const ARTICLES_URL = `${BASE_URL}/digitalisierung-und-ki`;
-const LOGIN_URL = `${BASE_URL}/login`;
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'http://flaresolverr:8191/v1';
+
+// ─── Site configuration ────────────────────────────────────────────────────────
+
+interface LoginConfig {
+  csrfSelector: string;
+  usernameField: string;
+  passwordField: string;
+  csrfField: string;
+  extraFields?: Record<string, string>;
+  formSelector: string;
+}
+
+interface ListParsingConfig {
+  strategy: 'authorBlock' | 'directLinks';
+  authorBlockSelector?: string;
+  dateSelector?: string;
+  authorLinkSelector?: string;
+  ancestorDepth?: number;
+}
+
+interface ContentParsingConfig {
+  contentSelectors: string[];
+  titleSelector?: string;
+  authorSelector?: string;
+  dateSelector?: string;
+}
+
+interface SiteConfig {
+  label: string;
+  key: string;
+  baseUrl: string;
+  articlesUrl: string;
+  loginUrl: string;
+  needsCloudflareBypass: boolean;
+  login: LoginConfig;
+  listParsing: ListParsingConfig;
+  excludedPathPrefixes: string[];
+  minPathSegments: number;
+  contentParsing: ContentParsingConfig;
+}
+
+const SITE_CONFIGS: Record<string, SiteConfig> = {
+  tagesSpiegelBackground: {
+    label: 'Tagesspiegel Background',
+    key: 'tagesSpiegelBackground',
+    baseUrl: 'https://background.tagesspiegel.de',
+    articlesUrl: 'https://background.tagesspiegel.de/digitalisierung-und-ki',
+    loginUrl: 'https://background.tagesspiegel.de/login',
+    needsCloudflareBypass: true,
+    login: {
+      csrfSelector: 'input[name="_csrf_token"]',
+      usernameField: '_username',
+      passwordField: '_password',
+      csrfField: '_csrf_token',
+      extraFields: { fingerprint: '' },
+      formSelector: 'form',
+    },
+    listParsing: {
+      strategy: 'authorBlock',
+      authorBlockSelector: '.ts-teaser-authors',
+      dateSelector: '[class*="ts-type-xs"]',
+      authorLinkSelector: 'a[href*="/autor/"]',
+      ancestorDepth: 8,
+    },
+    excludedPathPrefixes: ['autor', 'tag', 'thema', 'login', 'suche', 'about', 'impressum', 'datenschutz'],
+    minPathSegments: 2,
+    contentParsing: {
+      contentSelectors: [
+        'article',
+        '[class*="article-body"]',
+        '[class*="article-content"]',
+        '[class*="articleBody"]',
+        '[class*="article__body"]',
+        'main',
+        '[role="main"]',
+      ],
+      titleSelector: 'h1',
+      authorSelector: 'a[href*="/autor/"]',
+      dateSelector: 'time',
+    },
+  },
+};
 
 // ─── FlareSolverr session helpers ─────────────────────────────────────────────
 
@@ -69,30 +148,27 @@ interface LoginDebug {
   postHtmlSnippet: string;
 }
 
-async function login(session: string, email: string, password: string, debug = false): Promise<LoginDebug | void> {
+async function login(session: string, email: string, password: string, config: SiteConfig, debug = false): Promise<LoginDebug | void> {
   // GET login page — FlareSolverr solves Cloudflare challenge and stores cookies in session
-  const { html, cookies: getCookies } = await fsGet(LOGIN_URL, session);
+  const { html, cookies: getCookies } = await fsGet(config.loginUrl, session);
 
   const $ = cheerio.load(html);
-  const csrf = ($('input[name="_csrf_token"]').val() as string) || '';
-  // Fingerprint is set by JS on submit; send empty to match what the browser would send before JS runs
-  const fingerprint = '';
 
-  // Use the form's actual action URL (Symfony often uses /login_check, not /login)
-  const rawAction = $('form').attr('action') ?? '/login';
-  const postUrl = rawAction.startsWith('http') ? rawAction : BASE_URL + rawAction;
+  const csrf = ($(config.login.csrfSelector).val() as string) || '';
+  const rawAction = $(config.login.formSelector).attr('action') ?? '/login';
+  const postUrl = rawAction.startsWith('http') ? rawAction : config.baseUrl + rawAction;
 
   // Explicitly carry over GET cookies (PHPSESSID, cf_clearance) to POST
   // — FlareSolverr has a known bug where session cookies are not forwarded automatically
   const cookieArray = Array.from(getCookies.entries()).map(([name, value]) => ({ name, value }));
 
-  // POST credentials — pass cookies explicitly so CSRF session validation works
-  const body = new URLSearchParams({
-    _username: email,
-    _password: password,
-    _csrf_token: csrf,
-    fingerprint,
-  });
+  const bodyParams: Record<string, string> = {
+    [config.login.usernameField]: email,
+    [config.login.passwordField]: password,
+    [config.login.csrfField]: csrf,
+    ...(config.login.extraFields ?? {}),
+  };
+  const body = new URLSearchParams(bodyParams);
 
   const postResult = await fsPost(postUrl, session, body.toString(), cookieArray);
 
@@ -117,79 +193,83 @@ interface ArticleItem {
   author: string;
 }
 
-function isArticleUrl(url: string): boolean {
+function isArticleUrl(url: string, config: SiteConfig): boolean {
   try {
     const path = new URL(url).pathname;
-    // Exclude author profiles, tag pages, category root, login, etc.
-    if (/^\/(autor|tag|thema|login|suche|about|impressum|datenschutz)(\/|$)/.test(path)) return false;
-    // Must have at least 2 path segments (e.g. /digitalisierung-und-ki/article-slug)
-    return path.split('/').filter(Boolean).length >= 2;
+    const exclusionPattern = new RegExp(
+      `^\\/(${config.excludedPathPrefixes.join('|')})(\\/|$)`,
+    );
+    if (exclusionPattern.test(path)) return false;
+    return path.split('/').filter(Boolean).length >= config.minPathSegments;
   } catch { return false; }
 }
 
-function parseArticleList(html: string): ArticleItem[] {
+function parseArticleList(html: string, config: SiteConfig): ArticleItem[] {
   const $ = cheerio.load(html);
   const results: ArticleItem[] = [];
   const seen = new Set<string>();
+  const lp = config.listParsing;
 
-  // This site uses .ts-teaser-authors as the author/date block inside each article teaser.
-  // Anchor on those blocks and walk up to find the article link and title.
-  const authorBlocks = $('.ts-teaser-authors').toArray();
+  if (lp.strategy === 'authorBlock' && lp.authorBlockSelector) {
+    const authorBlocks = $(lp.authorBlockSelector).toArray();
 
-  for (const el of authorBlocks) {
-    const authorBlock = $(el);
+    for (const el of authorBlocks) {
+      const authorBlock = $(el);
 
-    // Date is in the first <p> with ts-type-xs class inside the author block (e.g. "18.03.2026")
-    const date = extractGermanDate(authorBlock.find('[class*="ts-type-xs"]').first().text());
+      // Date is in the first element matching dateSelector inside the author block (e.g. "18.03.2026")
+      const date = extractGermanDate(
+        authorBlock.find(lp.dateSelector ?? '[class*="ts-type-xs"]').first().text(),
+      );
 
-    // Author names come from /autor/ links inside the block
-    const author = authorBlock.find('a[href*="/autor/"]')
-      .toArray()
-      .map((a: any) => $(a).text().trim())
-      .join(', ');
+      // Author names come from authorLinkSelector links inside the block
+      const author = authorBlock.find(lp.authorLinkSelector ?? 'a[href*="/autor/"]')
+        .toArray()
+        .map((a: any) => $(a).text().trim())
+        .join(', ');
 
-    // Walk up ancestors to find the teaser container that has an article link
-    let url = '';
-    let title = '';
-    let summary = '';
-    let ancestor = authorBlock.parent();
-    for (let depth = 0; depth < 8; depth++) {
-      if (!ancestor.length) break;
-      const articleLinks = ancestor.find('a[href]').toArray().filter((a: any) => {
-        const href = $(a).attr('href') ?? '';
-        const abs = href.startsWith('/') ? BASE_URL + href : href;
-        return isArticleUrl(abs) && !href.includes('/autor/');
-      });
-      if (articleLinks.length > 0) {
-        const href = $(articleLinks[0]).attr('href') ?? '';
-        url = href.startsWith('/') ? BASE_URL + href : href;
-        const linkEl = $(articleLinks[0]);
-        // Try heading inside the link first (article links often wrap the headline)
-        // then h3/h4 in the ancestor (section headings tend to be h2),
-        // then the link's own text as last resort
-        title = linkEl.find('h1, h2, h3, h4, [class*="headline"]').first().text().trim()
-          || ancestor.find('h3, h4, [class*="headline"]').first().text().trim()
-          || ancestor.find('h2').first().text().trim()
-          || linkEl.text().trim().slice(0, 300);
-        summary = ancestor.find('p').not(authorBlock.find('p')).first().text().trim();
-        break;
+      // Walk up ancestors to find the teaser container that has an article link
+      let url = '', title = '', summary = '';
+      let ancestor = authorBlock.parent();
+      const depth = lp.ancestorDepth ?? 8;
+
+      for (let d = 0; d < depth; d++) {
+        if (!ancestor.length) break;
+        const articleLinks = ancestor.find('a[href]').toArray().filter((a: any) => {
+          const href = $(a).attr('href') ?? '';
+          const abs = href.startsWith('/') ? config.baseUrl + href : href;
+          return isArticleUrl(abs, config) && !href.includes('/autor/');
+        });
+        if (articleLinks.length > 0) {
+          const href = $(articleLinks[0]).attr('href') ?? '';
+          url = href.startsWith('/') ? config.baseUrl + href : href;
+          const linkEl = $(articleLinks[0]);
+          // Try heading inside the link first (article links often wrap the headline)
+          // then h3/h4 in the ancestor (section headings tend to be h2),
+          // then the link's own text as last resort
+          title = linkEl.find('h1, h2, h3, h4, [class*="headline"]').first().text().trim()
+            || ancestor.find('h3, h4, [class*="headline"]').first().text().trim()
+            || ancestor.find('h2').first().text().trim()
+            || linkEl.text().trim().slice(0, 300);
+          summary = ancestor.find('p').not(authorBlock.find('p')).first().text().trim();
+          break;
+        }
+        ancestor = ancestor.parent();
       }
-      ancestor = ancestor.parent();
-    }
 
-    if (!url || seen.has(url)) continue;
-    if (!title || title.length < 5) continue;
-    seen.add(url);
-    results.push({ title, url, summary, date, author });
+      if (!url || seen.has(url)) continue;
+      if (!title || title.length < 5) continue;
+      seen.add(url);
+      results.push({ title, url, summary, date, author });
+    }
   }
 
-  // Fallback: collect all article links directly from the page
+  // Fallback / directLinks strategy
   if (results.length === 0) {
     $('a[href]').each((_: number, el: any) => {
       const href = $(el).attr('href') ?? '';
-      const abs = href.startsWith('/') ? BASE_URL + href : href;
-      if (!abs.startsWith(BASE_URL) || seen.has(abs)) return;
-      if (!isArticleUrl(abs)) return;
+      const abs = href.startsWith('/') ? config.baseUrl + href : href;
+      if (!abs.startsWith(config.baseUrl) || seen.has(abs)) return;
+      if (!isArticleUrl(abs, config)) return;
       const title = $(el).text().trim();
       if (title.length < 10) return;
       seen.add(abs);
@@ -215,33 +295,32 @@ function extractGermanDate(raw: string): string {
   return m ? m[0] : raw.trim();
 }
 
-function parseArticleContent(html: string, articleUrl: string): ArticleContent {
+function parseArticleContent(html: string, articleUrl: string, config: SiteConfig): ArticleContent {
   const $ = cheerio.load(html);
+  const cp = config.contentParsing;
 
-  // Prioritise h1 — [class*="title"] often matches navigation/category labels first
-  const title = $('h1').first().text().trim()
+  // Prioritise titleSelector — [class*="title"] often matches navigation/category labels first
+  const titleSel = cp.titleSelector ?? 'h1';
+  const title = $(titleSel).first().text().trim()
     || $('[class*="headline"]').first().text().trim()
     || $('title').text().trim();
 
   // Date: prefer <time datetime>, fall back to text containing dd.mm.yyyy
-  const timeEl = $('time').first();
+  const dateSel = cp.dateSelector ?? 'time';
+  const timeEl = $(dateSel).first();
   const rawDate = timeEl.attr('datetime') ?? timeEl.text().trim()
     ?? $('[class*="ts-type-xs"]').first().text().trim();
   const date = extractGermanDate(rawDate);
 
-  // Author: use /autor/ links which are specific to author profiles on this site
-  const authorLinks = $('a[href*="/autor/"]').toArray();
-  const author = authorLinks.length > 0
-    ? authorLinks.map((a: any) => $(a).text().trim()).join(', ')
+  // Author: use authorSelector which is specific to author profiles on this site
+  const authorSel = cp.authorSelector ?? '[rel="author"]';
+  const authorEls = $(authorSel).toArray();
+  const author = authorEls.length > 0
+    ? authorEls.map((a: any) => $(a).text().trim()).join(', ')
     : $('[rel="author"]').first().text().trim();
 
-  const contentSelectors = [
-    'article', '[class*="article-body"]', '[class*="article-content"]',
-    '[class*="articleBody"]', '[class*="article__body"]', 'main', '[role="main"]',
-  ];
-
   let contentEl = null;
-  for (const sel of contentSelectors) {
+  for (const sel of cp.contentSelectors) {
     const found = $(sel).first();
     if (found.length) { contentEl = found; break; }
   }
@@ -260,19 +339,49 @@ function parseArticleContent(html: string, articleUrl: string): ArticleContent {
 
 // ─── n8n node ─────────────────────────────────────────────────────────────────
 
-export class TagesSpiegelBackground implements INodeType {
+export class ArticleScraper implements INodeType {
   description: INodeTypeDescription = {
-    displayName: 'Tagesspiegel Background',
-    name: 'tagesSpiegelBackground',
+    displayName: 'Article Scraper',
+    name: 'articleScraper',
     icon: 'file:tagesspiegel.svg',
     group: ['input'],
     version: 1,
-    description: 'Fetch articles from Tagesspiegel Background (Digitalisierung & KI)',
-    defaults: { name: 'Tagesspiegel Background' },
+    description: 'Scrape articles from a configured site or a custom config-driven site',
+    defaults: { name: 'Article Scraper' },
     inputs: ['main'],
     outputs: ['main'],
-    credentials: [{ name: 'tagesSpiegelBackgroundApi', required: true }],
+    credentials: [{ name: 'articleScraperApi', required: true }],
     properties: [
+      {
+        displayName: 'Site',
+        name: 'site',
+        type: 'options',
+        noDataExpression: true,
+        default: 'tagesSpiegelBackground',
+        description: 'Which site to scrape',
+        options: [
+          {
+            name: 'Tagesspiegel Background',
+            value: 'tagesSpiegelBackground',
+            description: 'Tagesspiegel Background – Digitalisierung & KI',
+          },
+          {
+            name: 'Custom',
+            value: 'custom',
+            description: 'Provide a JSON SiteConfig object',
+          },
+        ],
+      },
+      {
+        displayName: 'Custom Config (JSON)',
+        name: 'customConfig',
+        type: 'string',
+        typeOptions: { rows: 8 },
+        default: '',
+        required: true,
+        description: 'Paste a JSON object matching the SiteConfig interface',
+        displayOptions: { show: { site: ['custom'] } },
+      },
       {
         displayName: 'Operation',
         name: 'operation',
@@ -328,7 +437,23 @@ export class TagesSpiegelBackground implements INodeType {
   };
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-    const credentials = await this.getCredentials('tagesSpiegelBackgroundApi');
+    const site = this.getNodeParameter('site', 0, 'tagesSpiegelBackground') as string;
+
+    let config: SiteConfig;
+    if (site === 'custom') {
+      const raw = this.getNodeParameter('customConfig', 0) as string;
+      if (!raw) throw new NodeOperationError(this.getNode(), 'Custom Config (JSON) is required when site = Custom');
+      try {
+        config = JSON.parse(raw) as SiteConfig;
+      } catch (e) {
+        throw new NodeOperationError(this.getNode(), `Custom Config JSON is invalid: ${(e as Error).message}`);
+      }
+    } else {
+      config = SITE_CONFIGS[site];
+      if (!config) throw new NodeOperationError(this.getNode(), `Unknown site key: ${site}`);
+    }
+
+    const credentials = await this.getCredentials('articleScraperApi');
     const operation = this.getNodeParameter('operation', 0) as string;
     const email = credentials.email as string;
     const password = credentials.password as string;
@@ -338,7 +463,7 @@ export class TagesSpiegelBackground implements INodeType {
     try {
       if (operation === 'debug') {
         // Show login page form fields BEFORE attempting login
-        const { html: loginHtml } = await fsGet(LOGIN_URL, session);
+        const { html: loginHtml } = await fsGet(config.loginUrl, session);
         const $l = cheerio.load(loginHtml);
         const formFields = $l('input').toArray().map((el: any) => ({
           name: $l(el).attr('name'),
@@ -347,15 +472,16 @@ export class TagesSpiegelBackground implements INodeType {
         }));
         const formAction = $l('form').attr('action') ?? '(none)';
 
-        const loginDebug = await login(session, email, password, true) as LoginDebug;
-        const { html, status, url, cookies } = await fsGet(ARTICLES_URL, session);
+        const loginDebug = await login(session, email, password, config, true) as LoginDebug;
+        const { html, status, url, cookies } = await fsGet(config.articlesUrl, session);
         const loginStatusMatch = html.match(/"user_login_status":"([^"]+)"/);
 
         // Extract first article container HTML to diagnose selectors
         const $a = cheerio.load(html);
-        const firstAuthorBlock = $a('.ts-teaser-authors').first();
-        const firstContainerHtml = firstAuthorBlock.parent().prop('outerHTML')?.slice(0, 3000) ?? '(no ts-teaser-authors found)';
-        const allContainerClasses = $a('.ts-teaser-authors')
+        const authorBlockSel = config.listParsing.authorBlockSelector ?? '.ts-teaser-authors';
+        const firstAuthorBlock = $a(authorBlockSel).first();
+        const firstContainerHtml = firstAuthorBlock.parent().prop('outerHTML')?.slice(0, 3000) ?? `(no ${authorBlockSel} found)`;
+        const allContainerClasses = $a(authorBlockSel)
           .toArray().slice(0, 5).map((el: any) => $a(el).parent().attr('class') ?? '').join(' | ');
 
         return [[{
@@ -377,7 +503,7 @@ export class TagesSpiegelBackground implements INodeType {
         }]];
       }
 
-      await login(session, email, password, false);
+      await login(session, email, password, config, false);
 
       const todayOnly = this.getNodeParameter('todayOnly', 0, true) as boolean;
       const todayDE = new Date().toLocaleDateString('de-DE', {
@@ -392,8 +518,8 @@ export class TagesSpiegelBackground implements INodeType {
       }
 
       if (operation === 'getArticleList') {
-        const { html } = await fsGet(ARTICLES_URL, session);
-        const allArticles = parseArticleList(html);
+        const { html } = await fsGet(config.articlesUrl, session);
+        const allArticles = parseArticleList(html, config);
         const articles = todayOnly ? allArticles.filter((a) => matchesToday(a.date)) : allArticles;
         if (articles.length === 0) {
           const rawDates = allArticles.map((a) => a.date || '(empty)').slice(0, 10).join(' | ');
@@ -408,8 +534,8 @@ export class TagesSpiegelBackground implements INodeType {
       }
 
       if (operation === 'getAllArticlesWithContent') {
-        const { html: listHtml } = await fsGet(ARTICLES_URL, session);
-        const allArticles = parseArticleList(listHtml);
+        const { html: listHtml } = await fsGet(config.articlesUrl, session);
+        const allArticles = parseArticleList(listHtml, config);
         const articles = todayOnly ? allArticles.filter((a) => matchesToday(a.date)) : allArticles;
         if (articles.length === 0) {
           const rawDates = allArticles.map((a) => a.date || '(empty)').slice(0, 10).join(' | ');
@@ -423,7 +549,7 @@ export class TagesSpiegelBackground implements INodeType {
         const results: INodeExecutionData[] = [];
         for (const article of articles) {
           const { html: contentHtml } = await fsGet(article.url, session);
-          const content = parseArticleContent(contentHtml, article.url);
+          const content = parseArticleContent(contentHtml, article.url, config);
           results.push({
             json: {
               title: content.title || article.title,
@@ -442,7 +568,7 @@ export class TagesSpiegelBackground implements INodeType {
         const articleUrl = this.getNodeParameter('articleUrl', 0) as string;
         if (!articleUrl) throw new NodeOperationError(this.getNode(), 'Article URL is required');
         const { html } = await fsGet(articleUrl, session);
-        const result = parseArticleContent(html, articleUrl);
+        const result = parseArticleContent(html, articleUrl, config);
         return [[{ json: result as unknown as INodeExecutionData['json'] }]];
       }
 
